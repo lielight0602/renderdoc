@@ -39,8 +39,8 @@
     <ATLMinimizesCRunTimeLibraryUsage>false</ATLMinimizesCRunTimeLibraryUsage>
     <CharacterSet>NotSet</CharacterSet>
     <ConfigurationType>Application</ConfigurationType>
-    <PrimaryOutput>qrenderdoc</PrimaryOutput>
-    <TargetName>qrenderdoc</TargetName>
+    <PrimaryOutput>qrendertest</PrimaryOutput>
+    <TargetName>qrendertest</TargetName>
     <IgnoreImportLibrary>true</IgnoreImportLibrary>
     <SolutionRelativeIntDir>$(Platform)\$(Configuration)\obj\$(ProjectName)\</SolutionRelativeIntDir>
   </PropertyGroup>
@@ -1466,7 +1466,7 @@
     <CustomBuild Include="Code\pyrenderdoc\renderdoc.i">
       <FileType>Document</FileType>
       <AdditionalInputs>%(Fullpath);$(SwigInterfaces);$(SwigHeaders);$(CoreReplayHeaders);%(AdditionalInputs)</AdditionalInputs>
-      <Command>"$(ProjectDir)3rdparty\swig\swig.exe" -v -Wextra -Werror -O -interface %(Filename) -c++ -python -modern -modernargs -enumclass -fastunpack -py3 -builtin -I"$(SolutionDir)renderdoc\api\replay" -outdir "$(IntDir)generated" -o "$(IntDir)generated\%(Filename)_python.cxx" "%(FullPath)"</Command>
+      <Command>"$(ProjectDir)3rdparty\swig\swig.exe" -v -Wextra -Werror -O -interface rendertest -c++ -python -modern -modernargs -enumclass -fastunpack -py3 -builtin -I"$(SolutionDir)renderdoc\api\replay" -outdir "$(IntDir)generated" -o "$(IntDir)generated\%(Filename)_python.cxx" "%(FullPath)"</Command>
       <Message>Compiling SWIG interface</Message>
       <Outputs>$(IntDir)generated\%(Filename)_python.cxx;%(Outputs)</Outputs>
       <LinkObjects>false</LinkObjects>
@@ -1474,7 +1474,7 @@
     <CustomBuild Include="Code\pyrenderdoc\qrenderdoc.i">
       <FileType>Document</FileType>
       <AdditionalInputs>%(Fullpath);$(SwigInterfaces);$(SwigHeaders);$(QRDHeaders);%(AdditionalInputs)</AdditionalInputs>
-      <Command>"$(ProjectDir)3rdparty\swig\swig.exe" -v -Wextra -Werror -O -interface %(Filename) -c++ -python -modern -modernargs -enumclass -fastunpack -py3 -builtin -I"$(SolutionDir)renderdoc\api\replay" -I"$(ProjectDir)." -outdir "$(IntDir)generated" -o "$(IntDir)generated\%(Filename)_python.cxx" "%(FullPath)"</Command>
+      <Command>"$(ProjectDir)3rdparty\swig\swig.exe" -v -Wextra -Werror -O -interface qrendertest -c++ -python -modern -modernargs -enumclass -fastunpack -py3 -builtin -I"$(SolutionDir)renderdoc\api\replay" -I"$(ProjectDir)." -outdir "$(IntDir)generated" -o "$(IntDir)generated\%(Filename)_python.cxx" "%(FullPath)"</Command>
       <Message>Compiling SWIG interface</Message>
       <Outputs>$(IntDir)generated\%(Filename)_python.cxx;%(Outputs)</Outputs>
       <LinkObjects>false</LinkObjects>

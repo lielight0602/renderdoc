@@ -4,7 +4,7 @@ import signal
 import datetime
 import time
 from typing import Callable, List
-import renderdoc as rd
+import rendertest as rd
 from . import util
 from .logging import log
 
@@ -41,11 +41,11 @@ class TargetControl():
         return self._pid
 
     def captures(self):
-        """Return a list of renderdoc.NewCaptureData with captures made."""
+        """Return a list of rendertest.NewCaptureData with captures made."""
         return self._captures
 
     def children(self):
-        """Return a list of renderdoc.NewChildData with any child processes created."""
+        """Return a list of rendertest.NewChildData with any child processes created."""
         return self._children
 
     def queue_capture(self, frame: int, num=1):
@@ -132,7 +132,7 @@ def run_executable(
     :param workdir: The working directory.
     :param envmods: Environment modifications to apply.
     :param cappath: The directory to output captures in.
-    :param opts: An instance of renderdoc.CaptureOptions.
+    :param opts: An instance of rendertest.CaptureOptions.
     :return:
     """
     if envmods is None:

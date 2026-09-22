@@ -1,6 +1,6 @@
 from typing import List, Tuple
 
-import renderdoc as rd
+import rendertest as rd
 import struct
 import rdtest
 

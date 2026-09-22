@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 import subprocess
 from typing import Callable, List, Optional, Tuple
-import renderdoc as rd
+import rendertest as rd
 from . import util
 from .logging import log
 import os

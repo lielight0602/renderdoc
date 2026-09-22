@@ -1,4 +1,4 @@
-%module renderdoc
+%module rendertest
 
 %feature("autodoc", "0");
 %feature("autodoc:noret", "1");

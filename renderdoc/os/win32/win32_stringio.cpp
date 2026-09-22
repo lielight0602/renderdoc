@@ -295,7 +295,7 @@ rdcstr GetReplayAppFilename()
     return exe;
   }
 
-  // if qrenderdoc.exe doesn't live in the same dir, we must be in x86/
+  // if qrendertest.exe doesn't live in the same dir, we must be in x86/
   // so look one up the tree.
   exe = path + "/../qrendertest.exe";
 
@@ -313,7 +313,7 @@ rdcstr GetReplayAppFilename()
   DWORD type = 0;
   DWORD dataSize = sizeof(curFile);
   RDCEraseEl(curFile);
-  RegGetValueW(HKEY_CLASSES_ROOT, L"RenderTest.RDCCapture.1\\DefaultIcon", NULL, RRF_RT_ANY, &type,
+  RegGetValueW(HKEY_CLASSES_ROOT, L"RenderDoc.RDCCapture.1\\DefaultIcon", NULL, RRF_RT_ANY, &type,
                (void *)curFile, &dataSize);
 
   if(type == REG_EXPAND_SZ || type == REG_SZ)

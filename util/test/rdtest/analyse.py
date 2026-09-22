@@ -1,7 +1,7 @@
 from __future__ import annotations
 import struct
 from typing import Dict, List, Tuple, Union
-import renderdoc as rd
+import rendertest as rd
 from . import util
 
 
@@ -15,7 +15,7 @@ def open_capture(
     :param cap: The capture file to use, or ``None`` if a filename is given.
     :param opts: The replay options to use, or ``None`` to use the default options.
     :return: A replay controller for the capture
-    :rtype: renderdoc.ReplayController
+    :rtype: rendertest.ReplayController
     """
 
     if opts is None:

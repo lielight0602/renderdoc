@@ -1,5 +1,5 @@
 import rdtest
-import renderdoc as rd
+import rendertest as rd
 
 
 class GL_Shader_Editing(rdtest.TestCase):

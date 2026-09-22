@@ -81,11 +81,11 @@ bool CheckCoreInterface(rdcstr &log);
 bool CheckQtInterface(rdcstr &log);
 
 // defined in SWIG-generated renderdoc_python.cpp
-extern "C" PyObject *PyInit_renderdoc(void);
+extern "C" PyObject *PyInit_rendertest(void);
 extern "C" PyObject *PassObjectToPython(const char *type, void *obj);
 extern "C" PyObject *PassNewObjectToPython(const char *type, void *obj);
 // this one is in qrenderdoc_python.cpp
-extern "C" PyObject *PyInit_qrenderdoc(void);
+extern "C" PyObject *PyInit_qrendertest(void);
 extern "C" PyObject *WrapBareQWidget(QWidget *);
 extern "C" QWidget *UnwrapBareQWidget(PyObject *);
 
@@ -117,7 +117,7 @@ static inline QString ToQStr(PyObject *value)
   return QString();
 }
 
-static wchar_t program_name[] = L"qrenderdoc";
+static wchar_t program_name[] = L"qrendertest";
 static wchar_t python_home[1024] = {0};
 
 struct OutputRedirector
@@ -401,12 +401,12 @@ void PythonContext::GenerateStubs(const rdcarray<rdcstr> &extraPaths)
     }
 
     PyObject *args =
-        Py_BuildValue("(Os)", PyDict_GetItemString(main_dict, "renderdoc"), target.toUtf8().data());
+        Py_BuildValue("(Os)", PyDict_GetItemString(main_dict, "rendertest"), target.toUtf8().data());
     PyObject *retval = PyObject_CallObject(gen, args);
 
     if(!retval)
     {
-      qCritical() << "Didn't generate renderdoc stubs";
+      qCritical() << "Didn't generate rendertest stubs";
       HandleException(NULL);
     }
 
@@ -414,12 +414,12 @@ void PythonContext::GenerateStubs(const rdcarray<rdcstr> &extraPaths)
     Py_XDECREF(args);
 
     args =
-        Py_BuildValue("(Os)", PyDict_GetItemString(main_dict, "qrenderdoc"), target.toUtf8().data());
+        Py_BuildValue("(Os)", PyDict_GetItemString(main_dict, "qrendertest"), target.toUtf8().data());
     retval = PyObject_CallObject(gen, args);
 
     if(!retval)
     {
-      qCritical() << "Didn't generate qrenderdoc stubs";
+      qCritical() << "Didn't generate qrendertest stubs";
       HandleException(NULL);
     }
 
@@ -457,8 +457,8 @@ void PythonContext::GlobalInit(PersistentConfig &config)
   // for the exception signal
   qRegisterMetaType<QList<QString>>("QList<QString>");
 
-  PyImport_AppendInittab("renderdoc", &PyInit_renderdoc);
-  PyImport_AppendInittab("qrenderdoc", &PyInit_qrenderdoc);
+  PyImport_AppendInittab("rendertest", &PyInit_rendertest);
+  PyImport_AppendInittab("qrendertest", &PyInit_qrendertest);
 
 #if PY_VERSION_HEX > 0x030B0000
   PyConfig pyconfig;
@@ -523,8 +523,8 @@ void PythonContext::GlobalInit(PersistentConfig &config)
 
   PyObject *main_module = PyImport_AddModule("__main__");
 
-  PyModule_AddObject(main_module, "renderdoc", PyImport_ImportModule("renderdoc"));
-  PyModule_AddObject(main_module, "qrenderdoc", PyImport_ImportModule("qrenderdoc"));
+  PyModule_AddObject(main_module, "rendertest", PyImport_ImportModule("rendertest"));
+  PyModule_AddObject(main_module, "qrendertest", PyImport_ImportModule("qrendertest"));
 
   main_dict = PyModule_GetDict(main_module);
 
@@ -962,7 +962,7 @@ except:
 
         Py_XDECREF(syspath);
 
-        m_StubRD = PyImport_ImportModule(QFormatStr("v%1_%2.renderdoc")
+        m_StubRD = PyImport_ImportModule(QFormatStr("v%1_%2.rendertest")
                                              .arg(RENDERDOC_VERSION_MAJOR)
                                              .arg(RENDERDOC_VERSION_MINOR)
                                              .toUtf8()
@@ -970,11 +970,11 @@ except:
 
         if(!m_StubRD)
         {
-          qCritical() << "Failed importing stubs for renderdoc";
+          qCritical() << "Failed importing stubs for rendertest";
           HandleException(NULL);
         }
 
-        m_StubQRD = PyImport_ImportModule(QFormatStr("v%1_%2.qrenderdoc")
+        m_StubQRD = PyImport_ImportModule(QFormatStr("v%1_%2.qrendertest")
                                               .arg(RENDERDOC_VERSION_MAJOR)
                                               .arg(RENDERDOC_VERSION_MINOR)
                                               .toUtf8()
@@ -982,17 +982,17 @@ except:
 
         if(!m_StubQRD)
         {
-          qCritical() << "Failed importing stubs for qrenderdoc";
+          qCritical() << "Failed importing stubs for qrendertest";
           HandleException(NULL);
         }
 
         PyObject *alias_modules = PyObject_SafeGetAttrString(m_Reflector, "alias_modules");
 
         if(m_StubRD)
-          PyDict_SetItemString(alias_modules, "renderdoc", m_StubRD);
+          PyDict_SetItemString(alias_modules, "rendertest", m_StubRD);
 
         if(m_StubQRD)
-          PyDict_SetItemString(alias_modules, "qrenderdoc", m_StubQRD);
+          PyDict_SetItemString(alias_modules, "qrendertest", m_StubQRD);
 
         Py_XDECREF(alias_modules);
 
@@ -1098,7 +1098,7 @@ bool PythonContext::CheckInterfaces(rdcstr &log)
   errors |= CheckCoreInterface(log);
   errors |= CheckQtInterface(log);
 
-  for(rdcstr module_name : {"renderdoc", "qrenderdoc"})
+  for(rdcstr module_name : {"rendertest", "qrendertest"})
   {
     PyObject *mod = PyImport_ImportModule(module_name.c_str());
     PyObject *dict = PyModule_GetDict(mod);

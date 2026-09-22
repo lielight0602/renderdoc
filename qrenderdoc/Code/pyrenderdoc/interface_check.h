@@ -163,7 +163,7 @@ inline bool check_interface(rdcstr &log, swig_type_info **swig_types, size_t num
     }
 
     rdcstr typeName = typeobj->tp_name;
-    errors_found |= checkname(log, "renderdoc", typeName, NameType::Type, "");
+    errors_found |= checkname(log, "rendertest", typeName, NameType::Type, "");
 
     PyObject *dict = typeobj->tp_dict;
 

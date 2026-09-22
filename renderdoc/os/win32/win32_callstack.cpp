@@ -965,8 +965,8 @@ Win32CallstackResolver::Win32CallstackResolver(bool interactive, byte *moduleDB,
         {
           pdbName = get_dirname(defaultPdb) + "\\" + get_basename(defaultPdb);
 
-          // prompt for new pdbName, unless it's renderdoc or dbghelp, or we're non-interactive
-          if(pdbName.contains("renderdoc.") || pdbName.contains("dbghelp.") ||
+          // prompt for new pdbName, unless it's rendertest or dbghelp, or we're non-interactive
+          if(pdbName.contains("rendertest.") || pdbName.contains("dbghelp.") ||
              pdbName.contains("symsrv.") || !interactive)
             pdbName = "";
           else
@@ -1004,9 +1004,9 @@ Win32CallstackResolver::Win32CallstackResolver(bool interactive, byte *moduleDB,
 
       RDCWARN("Couldn't get symbols for %s", m.name.c_str());
 
-      // silently ignore renderdoc.dll, dbghelp.dll, and symsrv.dll without asking to permanently
+      // silently ignore rendertest.dll, dbghelp.dll, and symsrv.dll without asking to permanently
       // ignore
-      if(m.name.contains("renderdoc.") || m.name.contains("dbghelp.") || m.name.contains("symsrv."))
+      if(m.name.contains("rendertest.") || m.name.contains("dbghelp.") || m.name.contains("symsrv."))
         continue;
 
       // if we're not interactive, just continue

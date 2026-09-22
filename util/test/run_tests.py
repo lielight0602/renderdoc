@@ -78,7 +78,7 @@ if args.renderdoc is not None:
 # try to just pull in the default build location. Favour development over release
 if sys.platform == "win32" and custom_pyrenderdoc is None:
     try:
-        import renderdoc as _
+        import rendertest as _
     except ImportError:
         root = os.path.dirname(os.path.dirname(script_dir))
         import struct
@@ -132,7 +132,7 @@ except (ModuleNotFoundError, ImportError) as ex:
     with open(os.path.join(artifacts_dir, 'output.log.html'), "w") as f:
         f.write(f"<body><h1>Failed to import rdtest: {ex}</h1></body>")
 
-    print("Couldn't import renderdoc module. Try specifying path to python module with --pyrenderdoc " +
+    print("Couldn't import rendertest module. Try specifying path to python module with --pyrenderdoc " +
           "or the path to the native library with --renderdoc")
     print(ex)
 

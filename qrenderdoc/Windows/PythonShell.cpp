@@ -2070,10 +2070,10 @@ void PythonShell::createExtension_clicked()
       return;
     }
 
-    if(extName.startsWith(lit("renderdoc.")))
+    if(extName.startsWith(lit("rendertest.")) || extName.startsWith(lit("qrendertest.")))
     {
       RDDialog::critical(&dialog, tr("Invalid extension name"),
-                         tr("Extension name conflicts with builtin module 'renderdoc'."));
+                         tr("Extension name conflicts with a builtin module."));
       return;
     }
 
@@ -2192,8 +2192,8 @@ void PythonShell::createExtension_clicked()
         init.write(R"(
 # Blank RenderDoc UI extension
 
-import renderdoc as rd
-import qrenderdoc as qrd
+import rendertest as rd
+import qrendertest as qrd
 
 def register(version: str, pyrenderdoc: qrd.CaptureContext):
     print(f"New UI extension loaded in RenderDoc {version}")
@@ -2420,7 +2420,7 @@ QString PythonShell::scriptHeader()
 {
   return tr(R"(RenderDoc Python console, powered by python %1.
 The 'pyrenderdoc' object is the current CaptureContext instance.
-The 'renderdoc' and 'qrenderdoc' modules are available.
+The 'rendertest' and 'qrendertest' modules are available.
 Documentation is available: https://renderdoc.org/docs/python_api/index.html)")
       .arg(PythonContext::versionString());
 }

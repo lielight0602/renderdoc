@@ -1,6 +1,6 @@
 from __future__ import annotations
-import renderdoc as rd
-import qrenderdoc as qrd
+import rendertest as rd
+import qrendertest as qrd
 
 from typing import IO, Any, Dict, TYPE_CHECKING
 

@@ -12,7 +12,7 @@ import queue
 import datetime
 import time
 from typing import IO, List, Tuple, Type
-import renderdoc as rd
+import rendertest as rd
 from . import util
 from . import testcase
 from .logging import log
@@ -312,7 +312,7 @@ def run_tests(test_include: str, test_exclude: str, debugger: bool, parallel: in
                         if os.path.exists(args[i]):
                             args[i] = str(Path(args[i]).resolve())
 
-                    if 'renderdoccmd' in sys.executable:
+                    if 'rendertestcmd' in sys.executable:
                         args = ['vulkanlayer', '--register', '--system']
 
                     ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, ' '.join(args), None, 1)
@@ -494,8 +494,8 @@ def launch_remote_server():
     # Add parameter to run the remote server itself
     args.append('--internal_remote_server')
 
-    # if we're running from renderdoccmd, invoke it properly
-    if 'renderdoccmd' in sys.executable:
+    # if we're running from rendertestcmd, invoke it properly
+    if 'rendertestcmd' in sys.executable:
         # run_tests.py
         # --renderdoc
         # <renderdoc_path>

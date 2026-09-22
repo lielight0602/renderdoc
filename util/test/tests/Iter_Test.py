@@ -3,7 +3,7 @@ from typing import Callable, Dict, Tuple
 import rdtest
 import os
 import random
-import renderdoc as rd
+import rendertest as rd
 
 
 class Iter_Test(rdtest.TestCase):

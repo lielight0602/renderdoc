@@ -77,7 +77,7 @@
   <PropertyGroup>
     <LinkIncremental>false</LinkIncremental>
     <OutDir>$(SolutionDir)$(Platform)\$(Configuration)\pymodules\</OutDir>
-    <TargetName>renderdoc</TargetName>
+    <TargetName>rendertest</TargetName>
     <TargetExt>.pyd</TargetExt>
   </PropertyGroup>
   <ItemDefinitionGroup>
@@ -135,9 +135,9 @@
     <CustomBuild Include="renderdoc.i">
       <FileType>Document</FileType>
       <AdditionalInputs>%(Fullpath);$(SwigInterfaces);$(SwigHeaders);$(CoreReplayHeaders);%(AdditionalInputs)</AdditionalInputs>
-      <Command>"$(ProjectDir)..\..\3rdparty\swig\swig.exe" -v -Wextra -Werror -O -c++ -interface %(Filename) -python -modern -modernargs -enumclass -fastunpack -py3 -builtin -I"$(SolutionDir)renderdoc\api\replay" -outdir "$(IntDir)generated" -o "$(IntDir)generated\%(Filename)_module_python.cxx" "%(FullPath)"</Command>
+      <Command>"$(ProjectDir)..\..\3rdparty\swig\swig.exe" -v -Wextra -Werror -O -c++ -interface rendertest -python -modern -modernargs -enumclass -fastunpack -py3 -builtin -I"$(SolutionDir)renderdoc\api\replay" -outdir "$(IntDir)generated" -o "$(IntDir)generated\%(Filename)_module_python.cxx" "%(FullPath)"</Command>
       <Message>Compiling SWIG interface</Message>
-      <Outputs>$(IntDir)generated\%(Filename).py;$(IntDir)generated\%(Filename)_module_python.cxx;%(Outputs)</Outputs>
+      <Outputs>$(IntDir)generated\rendertest.py;$(IntDir)generated\%(Filename)_module_python.cxx;%(Outputs)</Outputs>
       <LinkObjects>false</LinkObjects>
     </CustomBuild>
     <ClCompile Include="$(IntDir)generated\renderdoc_module_python.cxx">

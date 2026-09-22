@@ -111,7 +111,7 @@ SET(FORCE_PY_VERSION "" CACHE STRING "Force a particular version of python to be
 
 option(INTERNAL_SELF_CAPTURE "Internal option: enable self-capture" OFF)
 
-set(RDOC_BASE_NAME "renderdoc")
+set(RDOC_BASE_NAME "rendertest")
 if(INTERNAL_SELF_CAPTURE)
     set(RDOC_BASE_NAME "rdocself")
     add_definitions(-DRDOC_SELFCAPTURE_LIMITEDAPI=1)

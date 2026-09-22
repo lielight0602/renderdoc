@@ -434,7 +434,7 @@ public:
     // run original UI exe (as admin still) and tell it an update succeeded so that it can do any last updates
     std::wstring cmdline = L"\"";
     cmdline += wide_path;
-    cmdline += L"/qrenderdoc.exe\" ";
+    cmdline += L"/qrendertest.exe\" ";
     if(successful)
       cmdline += L"--updatedone_admin";
     else
@@ -509,7 +509,7 @@ public:
           show.vt = VT_I4;
           show.lVal = SW_SHOWNORMAL;
 
-          std::wstring qrenderdoc = wide_path + L"/qrenderdoc.exe";
+          std::wstring qrenderdoc = wide_path + L"/qrendertest.exe";
 
           BSTR path = SysAllocStringLen(qrenderdoc.c_str(), (UINT)qrenderdoc.size());
           memcpy(path, qrenderdoc.c_str(), qrenderdoc.size());
@@ -533,7 +533,7 @@ public:
 
     cmdline = L"\"";
     cmdline += wide_path;
-    cmdline += L"/qrenderdoc.exe\" --updatedone";
+    cmdline += L"/qrendertest.exe\" --updatedone";
     ZeroMemory(paramsAlloc, sizeof(wchar_t) * 512);
     wcscpy_s(paramsAlloc, 511, cmdline.c_str());
 
@@ -729,7 +729,7 @@ public:
 
           ZeroMemory(paramsAlloc, sizeof(wchar_t) * 512);
 
-          _snwprintf_s(paramsAlloc, 511, 511, L"%s/qrenderdoc.exe --crash %s", exepath.c_str(),
+          _snwprintf_s(paramsAlloc, 511, 511, L"%s/qrendertest.exe --crash %s", exepath.c_str(),
                        destjson.c_str());
 
           PROCESS_INFORMATION pi;
@@ -819,7 +819,7 @@ public:
 
     if(rdoc == NULL)
     {
-      std::cerr << "globalhook couldn't find renderdoc.dll!" << std::endl;
+      std::cerr << "globalhook couldn't find rendertest.dll!" << std::endl;
       return 1;
     }
 
@@ -907,7 +907,7 @@ int main(int, char *)
     argv[i] = conv(std::wstring(wargv[i]));
 
   if(argv.empty())
-    argv.push_back("renderdoccmd");
+    argv.push_back("rendertestcmd");
 
   LocalFree(wargv);
 

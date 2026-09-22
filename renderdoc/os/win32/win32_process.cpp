@@ -1213,9 +1213,18 @@ struct GlobalHookData
     rdcwstr appinitDLLs;
   } dataNative, dataWow32;
 
+  // set once we've successfully read the previous AppInit values out of the registry. Until that
+  // happens we must never write those values back, or we'd be clobbering the real contents with
+  // our zero-initialised defaults.
+  bool nativeBackedUp = false;
+  bool wow32BackedUp = false;
+
   int32_t finished = 0;
   Threading::ThreadHandle pipeThread = 0;
 };
+
+// forward declaration, BackupAndChangeRegistry rolls back through this if it fails part way through
+void RestoreRegistry(const GlobalHookData &hookdata);
 
 // utility function to close the registry keys, print an error, and quit
 static RDResult HandleRegError(HKEY keyNative, HKEY keyWow32, LSTATUS ret, const char *msg)
@@ -1233,11 +1242,150 @@ static RDResult HandleRegError(HKEY keyNative, HKEY keyWow32, LSTATUS ret, const
                       "Check that RenderDoc is correctly running as administrator.");
 }
 
+// if we fail part way through changing the registry we have to undo anything we already set,
+// otherwise we'd leave LoadAppInit_DLLs enabled pointing at a half-written value. RestoreRegistry
+// only touches the keys we actually backed up, so this is safe to call at any point below.
 #define REG_CHECK(msg)                                    \
   if(ret != ERROR_SUCCESS)                                \
   {                                                       \
+    RestoreRegistry(hookdata);                            \
     return HandleRegError(keyNative, keyWow32, ret, msg); \
   }
+
+// AppInit_DLLs requires the shim to be referenced by a short (8.3) path. Short name creation can
+// be disabled globally or per-volume, in which case GetShortPathNameW succeeds but returns the
+// input path unchanged. If that's the case for where the shim lives, copy it to the shared
+// application data folder - which is on the system volume and so normally has short names enabled -
+// and hand that copy back to the caller instead.
+static RDResult MakeShimShortPathCapable(rdcstr &path)
+{
+  if(path.empty())
+    return RDResult();
+
+  std::wstring longpath = StringFormat::UTF82Wide(path).c_str();
+
+  // when short names are disabled GetShortPathNameW doesn't fail, it just returns the input path
+  // unchanged - so the required buffer is exactly the length of the input plus its null terminator
+  DWORD shortSize = GetShortPathNameW(longpath.c_str(), NULL, 0);
+
+  if(shortSize > 0 && shortSize != (DWORD)longpath.length() + 1)
+    return RDResult();
+
+  wchar_t programData[1024] = {};
+  if(GetEnvironmentVariableW(L"ProgramData", programData, 1024) == 0)
+    GetEnvironmentVariableW(L"ALLUSERSPROFILE", programData, 1024);
+
+  if(programData[0] == 0)
+  {
+    RETURN_ERROR_RESULT(
+        ResultCode::FileIOFailed,
+        "RenderDoc is installed on a volume or system that has short paths disabled.\n"
+        "For the global hook, short paths must be enabled where RenderDoc is installed.\n"
+        "Couldn't locate the shared application data folder to work around this.");
+  }
+
+  std::wstring dst = programData;
+  dst += L"\\";
+  dst += StringFormat::UTF82Wide(STRINGIZE(RDOC_BASE_NAME)).c_str();
+
+  CreateDirectoryW(dst.c_str(), NULL);
+
+  // keep only the filename - the copy goes directly in our folder, it doesn't mirror the tree
+  std::wstring filename = longpath;
+  size_t slash = filename.find_last_of(L"\\/");
+  if(slash != std::wstring::npos)
+    filename = filename.substr(slash + 1);
+
+  // The copy must not collide with a file that is already mapped. While the hook is armed this
+  // exact path *is* the AppInit_DLLs value, so every GUI process started since - including
+  // qrendertest itself, which is how the hook gets armed in the first place - has it mapped as an
+  // image, and Windows refuses to overwrite a mapped image no matter how long we retry.
+  //
+  // Putting the shim's identity in the filename side-steps that entirely: a rebuilt shim lands in a
+  // brand new file that nothing can have mapped yet, and an unchanged shim is simply reused as-is.
+  // This does mean one small leftover file per shim build in that folder, which is cheaper than the
+  // hook not arming at all.
+  uint64_t srcsize = FileIO::GetFileSize(path);
+  uint64_t srcmtime = FileIO::GetModifiedTimestamp(path);
+
+  std::wstring stem = filename;
+  std::wstring ext;
+  size_t dot = stem.find_last_of(L'.');
+  if(dot != std::wstring::npos)
+  {
+    ext = stem.substr(dot);
+    stem = stem.substr(0, dot);
+  }
+
+  rdcstr suffix =
+      StringFormat::Fmt("_%llx_%llx", (unsigned long long)srcsize, (unsigned long long)srcmtime);
+
+  dst += L"\\";
+  dst += stem;
+  dst += StringFormat::UTF82Wide(suffix).c_str();
+  dst += ext;
+
+  const rdcstr dstUtf8 = StringFormat::Wide2UTF8(dst.c_str());
+
+  // already placed by a previous arm of this same build - reuse it rather than fighting over it
+  if(srcsize == 0 || !FileIO::exists(dstUtf8) || FileIO::GetFileSize(dstUtf8) != srcsize)
+  {
+    // Now that the name is fresh the copy normally cannot be contended, but an antivirus/DLP agent
+    // can still hold a newly written file briefly, so retry on the errors that mean "not right now".
+    bool copied = false;
+    DWORD copyerr = ERROR_SUCCESS;
+
+    for(int attempt = 0; attempt < 15 && !copied; attempt++)
+    {
+      if(attempt > 0)
+        Sleep(100);
+
+      if(CopyFileW(longpath.c_str(), dst.c_str(), FALSE))
+      {
+        copied = true;
+        break;
+      }
+
+      copyerr = GetLastError();
+
+      if(copyerr != ERROR_SHARING_VIOLATION && copyerr != ERROR_ACCESS_DENIED)
+        break;
+    }
+
+    if(!copied)
+    {
+      RETURN_ERROR_RESULT(
+          ResultCode::FileIOFailed,
+          "RenderDoc is installed on a volume or system that has short paths disabled.\n"
+          "For the global hook, short paths must be enabled where RenderDoc is installed.\n"
+          "Couldn't copy the shim to '%s' to work around this (err %u). If something has that file "
+          "open - an antivirus/DLP agent, or a process that still has a previous shim loaded - close "
+          "it and try again.",
+          StringFormat::Wide2UTF8(dst.c_str()).c_str(), copyerr);
+    }
+  }
+
+  // the copy has to be shortenable, otherwise we've just moved the problem somewhere else
+  shortSize = GetShortPathNameW(dst.c_str(), NULL, 0);
+
+  if(shortSize == 0 || shortSize == (DWORD)dst.length() + 1)
+  {
+    RETURN_ERROR_RESULT(
+        ResultCode::FileIOFailed,
+        "RenderDoc is installed on a volume or system that has short paths disabled.\n"
+        "For the global hook, short paths must be enabled where RenderDoc is installed.\n"
+        "Couldn't find a location with short paths enabled to work around this.");
+  }
+
+  RDCLOG("Short paths are disabled where RenderDoc is installed, using a copy of the shim at %s "
+         "for the global hook instead",
+         StringFormat::Wide2UTF8(dst.c_str()).c_str());
+
+  // note we hand back the *long* path of the copy - BackupAndChangeRegistry shortens it itself
+  path = StringFormat::Wide2UTF8(dst.c_str());
+
+  return RDResult();
+}
 
 // function to backup the previous settings for AppInit, then enable it and write our own paths.
 RDResult BackupAndChangeRegistry(GlobalHookData &hookdata, const rdcstr &shimpathWow32,
@@ -1309,6 +1457,9 @@ RDResult BackupAndChangeRegistry(GlobalHookData &hookdata, const rdcstr &shimpat
   }
   REG_CHECK("Could not fetch AppInit_DLLs");
 
+  // from here on we may modify the registry, so note that we have something to restore back to
+  hookdata.nativeBackedUp = true;
+
   // set DWORD:1 for LoadAppInit_DLLs and convert our path to a short path then set it
   ret = RegSetValueExA(keyNative, "LoadAppInit_DLLs", 0, REG_DWORD, (const BYTE *)&one, sizeof(one));
   REG_CHECK("Could not set LoadAppInit_DLLs");
@@ -1338,6 +1489,8 @@ RDResult BackupAndChangeRegistry(GlobalHookData &hookdata, const rdcstr &shimpat
                          hookdata.dataWow32.appinitDLLs.data(), &sz);
     }
     REG_CHECK("Could not fetch AppInit_DLLs");
+
+    hookdata.wow32BackedUp = true;
 
     ret = RegSetValueExA(keyWow32, "LoadAppInit_DLLs", 0, REG_DWORD, (const BYTE *)&one, sizeof(one));
     REG_CHECK("Could not set LoadAppInit_DLLs");
@@ -1417,36 +1570,43 @@ RDResult BackupAndChangeRegistry(GlobalHookData &hookdata, const rdcstr &shimpat
 
 void RestoreRegistry(const GlobalHookData &hookdata)
 {
+  // nothing was read out of the registry, so there's nothing safe to put back
+  if(!hookdata.nativeBackedUp && !hookdata.wow32BackedUp)
+    return;
+
   HKEY keyNative = NULL;
   HKEY keyWow32 = NULL;
-  LSTATUS ret = RegCreateKeyExA(HKEY_LOCAL_MACHINE,
-                                "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Windows", 0, NULL,
-                                0, KEY_READ | KEY_WRITE, NULL, &keyNative, NULL);
+  LSTATUS ret = ERROR_SUCCESS;
 
-  REG_CHECK("Could not open AppInit key");
+  if(hookdata.nativeBackedUp)
+  {
+    ret = RegCreateKeyExA(HKEY_LOCAL_MACHINE,
+                          "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Windows", 0, NULL, 0,
+                          KEY_READ | KEY_WRITE, NULL, &keyNative, NULL);
+
+    REG_CHECK("Could not open AppInit key");
+
+    // set the native values back to where they were
+    ret = RegSetValueExA(keyNative, "LoadAppInit_DLLs", 0, REG_DWORD,
+                         (const BYTE *)&hookdata.dataNative.appinitEnabled,
+                         sizeof(hookdata.dataNative.appinitEnabled));
+    REG_CHECK("Could not set LoadAppInit_DLLs");
+
+    ret = RegSetValueExW(keyNative, L"AppInit_DLLs", 0, REG_SZ,
+                         (const BYTE *)hookdata.dataNative.appinitDLLs.c_str(),
+                         DWORD(hookdata.dataNative.appinitDLLs.length() * sizeof(wchar_t)));
+    REG_CHECK("Could not set AppInit_DLLs");
+  }
 
 #if ENABLED(RDOC_X64)
-  ret = RegCreateKeyExA(HKEY_LOCAL_MACHINE,
-                        "SOFTWARE\\Wow6432Node\\Microsoft\\Windows NT\\CurrentVersion\\Windows", 0,
-                        NULL, 0, KEY_READ | KEY_WRITE, NULL, &keyWow32, NULL);
-
-  REG_CHECK("Could not open AppInit key");
-#endif
-
-  // set the native values back to where they were
-  ret = RegSetValueExA(keyNative, "LoadAppInit_DLLs", 0, REG_DWORD,
-                       (const BYTE *)&hookdata.dataNative.appinitEnabled,
-                       sizeof(hookdata.dataNative.appinitEnabled));
-  REG_CHECK("Could not set LoadAppInit_DLLs");
-
-  ret = RegSetValueExW(keyNative, L"AppInit_DLLs", 0, REG_SZ,
-                       (const BYTE *)hookdata.dataNative.appinitDLLs.c_str(),
-                       DWORD(hookdata.dataNative.appinitDLLs.length() * sizeof(wchar_t)));
-  REG_CHECK("Could not set AppInit_DLLs");
-
-  // if we opened it, restore the Wow32 values as well
-  if(keyWow32)
+  if(hookdata.wow32BackedUp)
   {
+    ret = RegCreateKeyExA(HKEY_LOCAL_MACHINE,
+                          "SOFTWARE\\Wow6432Node\\Microsoft\\Windows NT\\CurrentVersion\\Windows",
+                          0, NULL, 0, KEY_READ | KEY_WRITE, NULL, &keyWow32, NULL);
+
+    REG_CHECK("Could not open AppInit key");
+
     ret = RegSetValueExA(keyWow32, "LoadAppInit_DLLs", 0, REG_DWORD,
                          (const BYTE *)&hookdata.dataWow32.appinitEnabled,
                          sizeof(hookdata.dataWow32.appinitEnabled));
@@ -1457,6 +1617,7 @@ void RestoreRegistry(const GlobalHookData &hookdata)
                          DWORD(hookdata.dataWow32.appinitDLLs.length() * sizeof(wchar_t)));
     REG_CHECK("Could not set AppInit_DLLs");
   }
+#endif
 }
 
 static GlobalHookData *globalHook = NULL;
@@ -1506,8 +1667,8 @@ RDResult Process::StartGlobalHook(const rdcstr &pathmatch, const rdcstr &capture
 
   renderdocPath = get_dirname(renderdocPath);
 
-  // the native renderdoccmd.exe is always next to the dll. Wow32 will be somewhere else
-  rdcstr cmdpathNative = renderdocPath + "\\renderdoccmd.exe";
+  // the native rendertestcmd.exe is always next to the dll. Wow32 will be somewhere else
+  rdcstr cmdpathNative = renderdocPath + "\\rendertestcmd.exe";
   rdcstr cmdpathWow32;
 
   rdcstr shimpathNative = renderdocPath;
@@ -1515,7 +1676,7 @@ RDResult Process::StartGlobalHook(const rdcstr &pathmatch, const rdcstr &capture
 
 #if ENABLED(RDOC_X64)
 
-  // native shim is just renderdocshim64.dll
+  // native shim is just rendertestshim64.dll
   shimpathNative = renderdocPath + "\\rendertestshim64.dll";
 
   // if it looks like we're in the development environment, look for the alternate bitness in the
@@ -1526,7 +1687,7 @@ RDResult Process::StartGlobalHook(const rdcstr &pathmatch, const rdcstr &capture
     renderdocPath.erase(devLocation, ~0U);
 
     shimpathWow32 = renderdocPath + "\\Win32\\Development\\rendertestshim32.dll";
-    cmdpathWow32 = renderdocPath + "\\Win32\\Development\\renderdoccmd.exe";
+    cmdpathWow32 = renderdocPath + "\\Win32\\Development\\rendertestcmd.exe";
   }
   else
   {
@@ -1537,7 +1698,7 @@ RDResult Process::StartGlobalHook(const rdcstr &pathmatch, const rdcstr &capture
       renderdocPath.erase(devLocation, ~0U);
 
       shimpathWow32 = renderdocPath + "\\Win32\\Release\\rendertestshim32.dll";
-      cmdpathWow32 = renderdocPath + "\\Win32\\Release\\renderdoccmd.exe";
+      cmdpathWow32 = renderdocPath + "\\Win32\\Release\\rendertestcmd.exe";
     }
   }
 
@@ -1545,7 +1706,7 @@ RDResult Process::StartGlobalHook(const rdcstr &pathmatch, const rdcstr &capture
   if(devLocation < 0)
   {
     shimpathWow32 = renderdocPath + "\\x86\\rendertestshim32.dll";
-    cmdpathWow32 = renderdocPath + "\\x86\\renderdoccmd.exe";
+    cmdpathWow32 = renderdocPath + "\\x86\\rendertestcmd.exe";
   }
 
 #else
@@ -1554,6 +1715,30 @@ RDResult Process::StartGlobalHook(const rdcstr &pathmatch, const rdcstr &capture
   shimpathNative = renderdocPath + "\\rendertestshim32.dll";
 
 #endif
+
+  // the Wow32 branch needs both the 32-bit shim (which becomes the AppInit_DLLs value) and the
+  // 32-bit renderdoccmd (which creates the shared memory the shim reads). If either is missing -
+  // eg. only one platform has been built - leave the Wow32 registry keys alone entirely. Checking
+  // only the shim isn't enough: with a shim but no cmd we'd enable the hook for 32-bit processes
+  // and then fail to launch the helper, taking the whole global hook down with it.
+  if(!shimpathWow32.empty() &&
+     (!FileIO::exists(shimpathWow32) || !FileIO::exists(cmdpathWow32)))
+  {
+    RDCLOG("Skipping the Wow32 global hook - missing 32-bit shim '%s' or cmd '%s'",
+           shimpathWow32.c_str(), cmdpathWow32.c_str());
+    shimpathWow32.clear();
+    cmdpathWow32.clear();
+  }
+
+  // AppInit_DLLs needs short paths, so if they're disabled on the volume the shim lives on, move
+  // the shim somewhere they are available before we touch the registry
+  RDResult shimStatus = MakeShimShortPathCapable(shimpathNative);
+  if(shimStatus != ResultCode::Succeeded)
+    return shimStatus;
+
+  shimStatus = MakeShimShortPathCapable(shimpathWow32);
+  if(shimStatus != ResultCode::Succeeded)
+    return shimStatus;
 
   GlobalHookData hookdata;
 
@@ -1648,64 +1833,68 @@ RDResult Process::StartGlobalHook(const rdcstr &pathmatch, const rdcstr &capture
 
   RDCEraseEl(pi);
 
-// repeat the process for the Wow32 renderdoccmd
+// repeat the process for the Wow32 renderdoccmd, if we have a 32-bit shim to hook with
 #if ENABLED(RDOC_X64)
-  params = StringFormat::Fmt(
-      "\"%s\" globalhook --match \"%s\" --capfile \"%s\" --debuglog \"%s\" --capopts \"%s\"",
-      cmdpathWow32.c_str(), pathmatch.c_str(), capturefile.c_str(), debugLogfile.c_str(),
-      optstr.c_str());
-
-  paramsAlloc = StringFormat::UTF82Wide(params);
-
+  if(!shimpathWow32.empty())
   {
-    SECURITY_ATTRIBUTES pipeSec;
-    pipeSec.nLength = sizeof(SECURITY_ATTRIBUTES);
-    pipeSec.bInheritHandle = TRUE;
-    pipeSec.lpSecurityDescriptor = NULL;
+    params = StringFormat::Fmt(
+        "\"%s\" globalhook --match \"%s\" --capfile \"%s\" --debuglog \"%s\" --capopts \"%s\"",
+        cmdpathWow32.c_str(), pathmatch.c_str(), capturefile.c_str(), debugLogfile.c_str(),
+        optstr.c_str());
 
-    BOOL res;
-    res = CreatePipe(&childEnd, &hookdata.dataWow32.pipe, &pipeSec, 0);
+    paramsAlloc = StringFormat::UTF82Wide(params);
 
-    if(!res)
     {
-      err = GetLastError();
+      SECURITY_ATTRIBUTES pipeSec;
+      pipeSec.nLength = sizeof(SECURITY_ATTRIBUTES);
+      pipeSec.bInheritHandle = TRUE;
+      pipeSec.lpSecurityDescriptor = NULL;
+
+      BOOL res;
+      res = CreatePipe(&childEnd, &hookdata.dataWow32.pipe, &pipeSec, 0);
+
+      if(!res)
+      {
+        err = GetLastError();
+        RestoreRegistry(hookdata);
+        RETURN_ERROR_RESULT(ResultCode::InternalError,
+                            "Could not create 64-bit stdin pipe (err %u)", err);
+      }
+
+      res = SetHandleInformation(hookdata.dataWow32.pipe, HANDLE_FLAG_INHERIT, 0);
+
+      if(!res)
+      {
+        err = GetLastError();
+        RestoreRegistry(hookdata);
+        RETURN_ERROR_RESULT(ResultCode::InternalError,
+                            "Could not make 64-bit stdin pipe inheritable (err %u)", err);
+      }
+
+      si.hStdInput = childEnd;
+    }
+
+    retValue = CreateProcessW(NULL, &paramsAlloc[0], &pSec, &tSec, true, CREATE_NEW_CONSOLE, NULL,
+                              NULL, &si, &pi);
+
+    err = GetLastError();
+
+    // we don't need this end anymore
+    CloseHandle(childEnd);
+
+    if(retValue == FALSE)
+    {
+      CloseHandle(hookdata.dataNative.pipe);
+      CloseHandle(hookdata.dataWow32.pipe);
       RestoreRegistry(hookdata);
-      RETURN_ERROR_RESULT(ResultCode::InternalError, "Could not create 64-bit stdin pipe (err %u)",
+      RETURN_ERROR_RESULT(ResultCode::InternalError,
+                          "Can't launch renderdoccmd from '%s' (err %u)", cmdpathWow32.c_str(),
                           err);
     }
 
-    res = SetHandleInformation(hookdata.dataWow32.pipe, HANDLE_FLAG_INHERIT, 0);
-
-    if(!res)
-    {
-      err = GetLastError();
-      RestoreRegistry(hookdata);
-      RETURN_ERROR_RESULT(ResultCode::InternalError,
-                          "Could not make 64-bit stdin pipe inheritable (err %u)", err);
-    }
-
-    si.hStdInput = childEnd;
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
   }
-
-  retValue = CreateProcessW(NULL, &paramsAlloc[0], &pSec, &tSec, true, CREATE_NEW_CONSOLE, NULL,
-                            NULL, &si, &pi);
-
-  err = GetLastError();
-
-  // we don't need this end anymore
-  CloseHandle(childEnd);
-
-  if(retValue == FALSE)
-  {
-    CloseHandle(hookdata.dataNative.pipe);
-    CloseHandle(hookdata.dataWow32.pipe);
-    RestoreRegistry(hookdata);
-    RETURN_ERROR_RESULT(ResultCode::InternalError, "Can't launch renderdoccmd from '%s' (err %u)",
-                        cmdpathWow32.c_str(), err);
-  }
-
-  CloseHandle(pi.hThread);
-  CloseHandle(pi.hProcess);
 #endif
 
   // set static global pointer with our data, and launch the thread

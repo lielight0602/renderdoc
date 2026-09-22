@@ -1,5 +1,5 @@
 import rdtest
-import renderdoc as rd
+import rendertest as rd
 
 
 class VK_CBuffer_Zoo(rdtest.TestCase):

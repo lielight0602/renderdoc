@@ -1,4 +1,4 @@
-import renderdoc as rd
+import rendertest as rd
 import struct
 import rdtest
 

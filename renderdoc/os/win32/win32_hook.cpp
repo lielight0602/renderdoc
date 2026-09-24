@@ -582,13 +582,405 @@ static void ForAllModules(std::function<void(const MODULEENTRY32 &me32)> callbac
   CloseHandle(hModuleSnap);
 }
 
+// A target that is packed and resolves its own imports can create graphics objects without ever
+// calling a function we intercept, but it cannot avoid *loading* the runtime DLLs it needs. The
+// process's module list is therefore ground truth for questions our hooks can't answer - most
+// importantly "did the target really create a device": the vendor's user-mode D3D driver (e.g.
+// nvwgf2umx.dll) and the Agility SDK's D3D12Core.dll only appear when a device was created.
+//
+// This polls independently of every hook and logs each module once, with its base and size.
+static DWORD WINAPI ModuleTraceThread(LPVOID)
+{
+  std::set<HMODULE> seen;
+
+  // ~3.5 minutes at 500ms. Longer than any target session we care about, and the thread exits on
+  // its own if the process outlives it.
+  for(int tick = 0; tick < 420; tick++)
+  {
+    ForAllModules([&seen](const MODULEENTRY32 &me32) {
+      if(seen.find(me32.hModule) != seen.end())
+        return;
+
+      seen.insert(me32.hModule);
+
+      // base and size are logged so that a later hook can tell whether a trampoline stub has to be
+      // allocated close to this module (an export address table entry is only a 32-bit RVA).
+      RDCLOG("MODTRACE %s base %p size %u", me32.szModule, me32.modBaseAddr,
+             (uint32_t)me32.modBaseSize);
+    });
+
+    Sleep(500);
+  }
+
+  RDCLOG("MODTRACE finished, %u modules seen", (uint32_t)seen.size());
+
+  return 0;
+}
+
+static void StartModuleTrace()
+{
+  HANDLE thread = CreateThread(NULL, 0, &ModuleTraceThread, NULL, 0, NULL);
+
+  if(thread)
+    CloseHandle(thread);
+  else
+    RDCLOG("MODTRACE couldn't start thread");
+}
+
+// ------------------------------------------------------------------------------------------------
+// Export address table rewriting
+//
+// Patching the import tables of all loaded modules only works if the caller resolves its imports
+// through the import table we patched. A packed target doesn't: it builds its own import table at
+// runtime, so it never calls the LoadLibrary/GetProcAddress we intercept either. What it *cannot*
+// avoid is taking the address of an entry point out of the target library's own export address
+// table, however it looks it up. So we edit that instead - every export we hook is redirected to a
+// stub that jumps to our hook, and it doesn't matter whether the address was obtained by
+// GetProcAddress, by hand-walking the export table, or by anything else.
+//
+// That patch has to land before the caller resolves anything, and the only place to do it is
+// inside the loader: on module load, with the loader lock held, before LoadLibrary returns.
+
+struct ExportStubPage
+{
+  byte *page = NULL;
+  size_t used = 0;
+};
+
+// Only ever held by the functions below. Nothing else takes this lock, and nothing takes it while
+// waiting on the loader lock, so acquiring it from the loader notification can't deadlock.
+static Threading::CriticalSection s_StubLock;
+static std::map<HMODULE, ExportStubPage> s_StubPages;
+
+static bool ExportTableHooksEnabled()
+{
+  // cached after the first call, so a target can't flip it mid-run
+  static int cached = -1;
+
+  if(cached < 0)
+  {
+    // only the first byte is needed, "0" disables
+    char value[2] = {};
+    DWORD len = GetEnvironmentVariableA("RT_EAT_HOOKS", value, ARRAY_COUNT(value));
+
+    cached = (len == 1 && value[0] == '0') ? 0 : 1;
+  }
+
+  return cached == 1;
+}
+
+static void GetModuleHeaders(HMODULE module, byte *&base, PIMAGE_OPTIONAL_HEADER &optHeader)
+{
+  base = (byte *)module;
+  optHeader = NULL;
+
+  PIMAGE_DOS_HEADER dosheader = (PIMAGE_DOS_HEADER)base;
+
+  if(dosheader->e_magic != 0x5a4d)
+    return;
+
+  char *PE00 = (char *)(base + dosheader->e_lfanew);
+  PIMAGE_FILE_HEADER fileHeader = (PIMAGE_FILE_HEADER)(PE00 + 4);
+  optHeader = (PIMAGE_OPTIONAL_HEADER)((BYTE *)fileHeader + sizeof(IMAGE_FILE_HEADER));
+}
+
+// EAT entries are 32-bit RVAs, so the stub has to sit above the module base within 4GB of it.
+// VirtualAlloc with an explicit address fails instead of relocating, so we walk upwards from just
+// past the image until we find a free page. In practice the first few probes land.
+static byte *AllocStubPage(HMODULE module)
+{
+  byte *base = NULL;
+  PIMAGE_OPTIONAL_HEADER optHeader = NULL;
+  GetModuleHeaders(module, base, optHeader);
+
+  if(optHeader == NULL)
+    return NULL;
+
+  const uint64_t allocGranularity = 0x10000;
+  const uint64_t addressSpace = 0x100000000ull;
+
+  uint64_t hint = (uint64_t)base + ((optHeader->SizeOfImage + allocGranularity - 1) &
+                                    ~(allocGranularity - 1));
+
+  for(int i = 0; i < 32768; i++)
+  {
+    void *page = VirtualAlloc((void *)hint, 4096, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+
+    if(page)
+    {
+      if((uint64_t)page > (uint64_t)base && ((uint64_t)page - (uint64_t)base) < addressSpace)
+        return (byte *)page;
+
+      VirtualFree(page, 0, MEM_RELEASE);
+      RDCERR("Stub page at %p can't be reached from module %p by a 32-bit RVA", page, base);
+      return NULL;
+    }
+
+    hint += allocGranularity;
+
+    // once past 4GB an RVA can't address it any more
+    if(hint - (uint64_t)base >= addressSpace)
+      break;
+  }
+
+  RDCERR("Couldn't allocate a stub page within 4GB of module %p", base);
+
+  return NULL;
+}
+
+// Is this address one of the stubs we've already installed for this module? HookAllModules runs
+// again on every subsequent load, so the export pass has to recognise its own work instead of
+// handing out a fresh stub each time.
+static bool IsJumpStub(HMODULE module, void *address)
+{
+  SCOPED_LOCK(s_StubLock);
+
+  auto sp = s_StubPages.find(module);
+
+  if(sp == s_StubPages.end() || sp->second.page == NULL)
+    return false;
+
+  uintptr_t addr = (uintptr_t)address;
+  uintptr_t first = (uintptr_t)sp->second.page;
+
+  return addr >= first && addr < first + sp->second.used;
+}
+
+// 12 bytes: mov rax, <destination> ; jmp rax
+static void *GetJumpStub(HMODULE module, void *destination)
+{
+  const size_t stubSize = 12;
+
+  SCOPED_LOCK(s_StubLock);
+
+  ExportStubPage &stubPage = s_StubPages[module];
+
+  if(stubPage.page == NULL)
+  {
+    stubPage.page = AllocStubPage(module);
+
+    if(stubPage.page == NULL)
+      return NULL;
+  }
+
+  if(stubPage.used + stubSize > 4096)
+  {
+    RDCERR("Out of space for jump stubs for module %p", module);
+    return NULL;
+  }
+
+  byte *stub = stubPage.page + stubPage.used;
+  stubPage.used += stubSize;
+
+  stub[0] = 0x48;
+  stub[1] = 0xb8;
+  memcpy(stub + 2, &destination, sizeof(destination));
+  stub[10] = 0xff;
+  stub[11] = 0xe0;
+
+  FlushInstructionCache(GetCurrentProcess(), stub, stubSize);
+
+  return stub;
+}
+
+static void PatchExportTable(const rdcstr &modName, HMODULE module)
+{
+  if(module == NULL || !s_HookData || !s_HookData->hookAll || !ExportTableHooksEnabled())
+    return;
+
+  auto hookset = s_HookData->DllHooks.find(modName);
+
+  if(hookset == s_HookData->DllHooks.end() || hookset->second.FunctionHooks.empty())
+    return;
+
+  byte *base = NULL;
+  PIMAGE_OPTIONAL_HEADER optHeader = NULL;
+  GetModuleHeaders(module, base, optHeader);
+
+  if(optHeader == NULL)
+    return;
+
+  DWORD dirRVA = optHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress;
+
+  if(dirRVA == 0)
+    return;
+
+  IMAGE_EXPORT_DIRECTORY *exportDesc = (IMAGE_EXPORT_DIRECTORY *)(base + dirRVA);
+  DWORD *funcs = (DWORD *)(base + exportDesc->AddressOfFunctions);
+  DWORD *names = (DWORD *)(base + exportDesc->AddressOfNames);
+  WORD *ordinals = (WORD *)(base + exportDesc->AddressOfNameOrdinals);
+
+  // an export whose RVA falls inside the export directory is a forwarder - the "RVA" is really a
+  // string naming another module and its export. That can't be redirected with a jump stub, and
+  // nothing we hook is forwarded, so leave those alone.
+  DWORD dirEnd = dirRVA + optHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].Size;
+
+  for(DWORD i = 0; i < exportDesc->NumberOfNames; i++)
+  {
+    const char *name = (const char *)(base + names[i]);
+
+    FunctionHook search(name, NULL, NULL);
+    auto found = std::lower_bound(hookset->second.FunctionHooks.begin(),
+                                  hookset->second.FunctionHooks.end(), search);
+
+    if(found == hookset->second.FunctionHooks.end() ||
+       strcmp(found->function.c_str(), name) != 0)
+      continue;
+
+    WORD ordinal = ordinals[i];
+
+    if(ordinal >= exportDesc->NumberOfFunctions)
+      continue;
+
+    DWORD &slot = funcs[ordinal];
+
+    if(slot >= dirRVA && slot < dirEnd)
+    {
+      RDCLOG("EAT %s!%s is a forwarder, not patching", modName.c_str(), name);
+      continue;
+    }
+
+    void *orig = base + slot;
+
+    // already redirected by an earlier pass
+    if(IsJumpStub(module, orig))
+      continue;
+
+    void *stub = GetJumpStub(module, found->hook);
+
+    if(stub == NULL)
+    {
+      RDCERR("Couldn't get a jump stub for %s!%s", modName.c_str(), name);
+      continue;
+    }
+
+    DWORD stubRVA = (DWORD)((uint64_t)stub - (uint64_t)base);
+
+    // The original has to be recorded before the entry is overwritten - from here on this name
+    // resolves to our stub for everyone, including our own GetProcAddress. Anything that reads
+    // hook.orig afterwards has to find the real function already there.
+    if(found->orig && *found->orig == NULL)
+      *found->orig = orig;
+
+    DWORD oldProtection = PAGE_EXECUTE;
+
+    if(!VirtualProtect(&slot, sizeof(DWORD), PAGE_READWRITE, &oldProtection))
+    {
+      RDCERR("Failed to make the export entry for %s!%s writeable", modName.c_str(), name);
+      continue;
+    }
+
+    slot = stubRVA;
+
+    VirtualProtect(&slot, sizeof(DWORD), oldProtection, &oldProtection);
+
+    RDCLOG("EAT patched %s!%s (%p) -> stub %p", modName.c_str(), name, orig, stub);
+  }
+}
+
+typedef struct
+{
+  USHORT Length;
+  USHORT MaximumLength;
+  PWSTR Buffer;
+} RDC_LDR_UNICODE_STRING;
+
+typedef struct
+{
+  ULONG Flags;
+  const RDC_LDR_UNICODE_STRING *FullDllName;
+  const RDC_LDR_UNICODE_STRING *BaseDllName;
+  PVOID DllBase;
+  ULONG SizeOfImage;
+} RDC_LDR_DLL_NOTIFICATION_DATA;
+
+typedef VOID(NTAPI *PFN_LDR_DLL_NOTIFICATION_FUNCTION)(ULONG reason,
+                                                       const RDC_LDR_DLL_NOTIFICATION_DATA *data,
+                                                       PVOID context);
+typedef LONG(NTAPI *PFN_LDR_REGISTER_DLL_NOTIFICATION)(ULONG reason,
+                                                       PFN_LDR_DLL_NOTIFICATION_FUNCTION callback,
+                                                       PVOID context, PVOID *cookie);
+
+static const ULONG RDC_LDR_DLL_NOTIFICATION_REASON_LOADED = 1;
+
+// Called on the loading thread with the loader lock held, once the image is mapped but before
+// LoadLibrary returns to whoever asked for it. That window is the entire point: the caller cannot
+// have resolved anything from the export table yet, so patching it here can't be raced - unlike
+// everything else we do, which waits for a load we only find out about after the fact.
+//
+// For the same reason this must not call LoadLibrary or GetProcAddress on another module, and must
+// not take a lock that anything else could hold while blocked on the loader lock. It only touches
+// the module's export table and the private stub allocator.
+static VOID NTAPI DllNotificationCallback(ULONG reason, const RDC_LDR_DLL_NOTIFICATION_DATA *data,
+                                          PVOID context)
+{
+  if(reason != RDC_LDR_DLL_NOTIFICATION_REASON_LOADED || data == NULL || data->DllBase == NULL ||
+     data->BaseDllName == NULL)
+    return;
+
+  if(!s_HookData || !s_HookData->hookAll || !ExportTableHooksEnabled())
+    return;
+
+  size_t len = data->BaseDllName->Length / sizeof(wchar_t);
+
+  if(len == 0)
+    return;
+
+  rdcwstr wname(len);
+  for(size_t i = 0; i < len; i++)
+    wname[i] = data->BaseDllName->Buffer[i];
+
+  rdcstr modName = strlower(StringFormat::Wide2UTF8(wname.c_str()));
+
+  PatchExportTable(modName, (HMODULE)data->DllBase);
+}
+
+static void StartExportTableHooks()
+{
+  if(!ExportTableHooksEnabled())
+  {
+    RDCLOG("Export table hooks disabled by RT_EAT_HOOKS");
+    return;
+  }
+
+  HMODULE ntdll = GetModuleHandleA("ntdll.dll");
+
+  if(ntdll == NULL)
+  {
+    RDCERR("Couldn't find ntdll to register the dll load notification");
+    return;
+  }
+
+  PFN_LDR_REGISTER_DLL_NOTIFICATION registerNotify =
+      (PFN_LDR_REGISTER_DLL_NOTIFICATION)GetProcAddress(ntdll, "LdrRegisterDllNotification");
+
+  if(registerNotify == NULL)
+  {
+    RDCERR("LdrRegisterDllNotification not present, target exports won't be hooked");
+    return;
+  }
+
+  PVOID cookie = NULL;
+  LONG status = registerNotify(0, &DllNotificationCallback, NULL, &cookie);
+
+  if(status == 0)
+    RDCLOG("Registered dll load notification, target export tables will be hooked");
+  else
+    RDCERR("LdrRegisterDllNotification failed with %ld, target exports won't be hooked", (long)status);
+}
+
 static void HookAllModules()
 {
   if(!s_HookData->hookAll)
     return;
 
-  ForAllModules(
-      [](const MODULEENTRY32 &me32) { s_HookData->ApplyHooks(me32.szModule, me32.hModule); });
+  ForAllModules([](const MODULEENTRY32 &me32) {
+    s_HookData->ApplyHooks(me32.szModule, me32.hModule);
+
+    // The load notification only covers libraries that appear after we registered it, so anything
+    // already in the process needs its export table patched here too.
+    PatchExportTable(strlower(rdcstr(me32.szModule)), me32.hModule);
+  });
 
   // check if we're already in this section of code, and if so don't go in again.
   int32_t prev = Atomic::CmpExch32(&s_HookData->posthooking, 0, 1);
@@ -615,9 +1007,21 @@ static void HookAllModules()
       }
     }
 
+    // a non-empty callback list means we haven't been here for this library before, i.e. this is the
+    // first time we've seen it loaded into the target. Libraries that only register function hooks
+    // have no callback and aren't reported, e.g. the internal loader hooks in api-ms-win-core-*.
+    const bool firstload = !it->second.Callbacks.empty();
+
     rdcarray<FunctionLoadCallback> callbacks;
     // don't call callbacks next time
     callbacks.swap(it->second.Callbacks);
+
+    // if one of the libraries we hook is never reported here, then no entry point in it could ever
+    // have been hooked - e.g. a missing d3d12.dll means anything creating a D3D12 device is not in
+    // the process we're in.
+    if(firstload)
+      RDCLOG("Target loaded library '%s' (%p), entry points hooked", it->first.c_str(),
+             it->second.module);
 
     for(FunctionLoadCallback cb : callbacks)
       if(cb)
@@ -853,6 +1257,9 @@ FARPROC WINAPI Hooked_GetProcAddress(HMODULE mod, const LPCSTR func)
       {
         FARPROC realfunc = GetProcAddress(mod, func);
 
+        RDCLOG("GetProcAddress('%s') matched our hook for '%s', returning our entry point", searchFunc,
+               it->first.c_str());
+
 #if ENABLED(VERBOSE_DEBUG_HOOK)
         RDCDEBUG("Found hooked function, returning hook pointer %p", found->hook);
 #endif
@@ -863,6 +1270,31 @@ FARPROC WINAPI Hooked_GetProcAddress(HMODULE mod, const LPCSTR func)
           return NULL;
 
         return (FARPROC)found->hook;
+      }
+    }
+  }
+
+  // the application asked for a function that we hook, but from a module we don't recognise as the
+  // library that exports it - so it gets the real pointer and any call bypasses us entirely. Report
+  // it, since this is otherwise invisible: e.g. D3D12CreateDevice resolved out of D3D12Core.dll.
+  if(!OrdinalAsString((void *)func))
+  {
+    for(auto it = s_HookData->DllHooks.begin(); it != s_HookData->DllHooks.end(); ++it)
+    {
+      FunctionHook search(func, NULL, NULL);
+
+      auto found =
+          std::lower_bound(it->second.FunctionHooks.begin(), it->second.FunctionHooks.end(), search);
+
+      if(found != it->second.FunctionHooks.end() && !(search < *found))
+      {
+        char modname[MAX_PATH] = {};
+        GetModuleFileNameA(mod, modname, MAX_PATH);
+
+        RDCLOG("GetProcAddress('%s') requested from '%s' (%p) - we hook that function in '%s' (%p), "
+               "so this call bypasses our hook",
+               func, modname, mod, it->first.c_str(), it->second.module);
+        break;
       }
     }
   }
@@ -976,6 +1408,14 @@ void LibraryHooks::EndHookRegistration()
 
     s_HookData->missedOrdinals = false;
   }
+
+  // only trace when we're actually hooking the target, not for the manual-hooking (replay) path.
+  // the trace is diagnostic only, it patches nothing.
+  if(s_HookData->hookAll)
+  {
+    StartExportTableHooks();
+    StartModuleTrace();
+  }
 }
 
 void LibraryHooks::Refresh()
@@ -1023,6 +1463,38 @@ bool LibraryHooks::Detect(const char *identifier)
       ret = true;
   });
   return ret;
+}
+
+void *LibraryHooks::GetOriginalFunction(HMODULE mod, const char *name)
+{
+  if(mod == NULL || name == NULL)
+    return NULL;
+
+  if(s_HookData)
+  {
+    char filename[MAX_PATH] = {};
+    GetModuleFileNameA(mod, filename, MAX_PATH - 1);
+    const char *slash = strrchr(filename, '\\');
+
+    rdcstr basename = strlower(rdcstr(slash ? slash + 1 : filename));
+
+    auto hookset = s_HookData->DllHooks.find(basename);
+
+    if(hookset != s_HookData->DllHooks.end())
+    {
+      FunctionHook search(name, NULL, NULL);
+      auto found = std::lower_bound(hookset->second.FunctionHooks.begin(),
+                                    hookset->second.FunctionHooks.end(), search);
+
+      if(found != hookset->second.FunctionHooks.end() &&
+         strcmp(found->function.c_str(), name) == 0 && found->orig && *found->orig)
+        return *found->orig;
+    }
+  }
+
+  // either we don't hook this export (so the export table is untouched) or we haven't seen the
+  // module yet - the real GetProcAddress is correct either way
+  return (void *)GetProcAddress(mod, name);
 }
 
 void Win32_RegisterManualModuleHooking()

@@ -177,6 +177,12 @@ public:
   // replay-type programs.
   static bool Detect(const char *identifier);
 
+  // On windows we also rewrite the export address table of hooked libraries, on top of patching the
+  // import tables of their callers. That means even our own naked GetProcAddress() now lands on our
+  // hooks - the usual self-exclusion only protects our import table, not the export table we edited.
+  // Any internal call site that needs the real function must come through here.
+  static void *GetOriginalFunction(HMODULE mod, const char *name);
+
 private:
   static void BeginHookRegistration();
   static void EndHookRegistration();

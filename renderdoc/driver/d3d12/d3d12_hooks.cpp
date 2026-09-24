@@ -903,7 +903,8 @@ private:
       HMODULE d3d12 = GetModuleHandleA("d3d12.dll");
 
       if(d3d12)
-        createFunc = (PFN_D3D12_CREATE_DEVICE)GetProcAddress(d3d12, "D3D12CreateDevice");
+        createFunc =
+            (PFN_D3D12_CREATE_DEVICE)LibraryHooks::GetOriginalFunction(d3d12, "D3D12CreateDevice");
 
       if(!createFunc)
       {

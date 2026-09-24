@@ -227,7 +227,7 @@ private:
     if(createFunc == NULL)
     {
       RDCWARN("Call to D3D11CreateDeviceAndSwapChain_hook without onward function pointer");
-      createFunc = (PFN_D3D11_CREATE_DEVICE_AND_SWAP_CHAIN)GetProcAddress(
+      createFunc = (PFN_D3D11_CREATE_DEVICE_AND_SWAP_CHAIN)LibraryHooks::GetOriginalFunction(
           GetModuleHandleA("d3d11.dll"), "D3D11CreateDeviceAndSwapChain");
     }
 

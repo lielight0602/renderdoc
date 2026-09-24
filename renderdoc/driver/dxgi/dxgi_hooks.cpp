@@ -27,6 +27,30 @@
 #include "hooks/hooks.h"
 #include "dxgi_wrapped.h"
 
+#include <intrin.h>
+
+// The factory hooks can't tell on their own whether the caller is the target's own renderer or an
+// un-packed component living in the same process (platform SDK, overlay, anti-cheat). That
+// distinction is the whole question when a packed target bypasses us for its own calls, so log the
+// caller's module. The return address has to come from the hook body - taking it in here would just
+// report this function's own caller.
+static void LogFactoryCaller(const char *func, void *ret)
+{
+  HMODULE caller = NULL;
+  if(!GetModuleHandleExA(
+         GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+         (LPCSTR)ret, &caller))
+    caller = NULL;
+
+  char modpath[MAX_PATH] = {};
+  if(caller)
+    GetModuleFileNameA(caller, modpath, MAX_PATH);
+
+  const char *name = strrchr(modpath, '\\');
+
+  RDCLOG("%s hook called from %s (%p)", func, name ? name + 1 : modpath, ret);
+}
+
 typedef HRESULT(WINAPI *PFN_CREATE_DXGI_FACTORY)(REFIID, void **);
 typedef HRESULT(WINAPI *PFN_CREATE_DXGI_FACTORY2)(UINT, REFIID, void **);
 typedef HRESULT(WINAPI *PFN_GET_DEBUG_INTERFACE)(REFIID, void **);
@@ -272,6 +296,8 @@ private:
 
   static HRESULT WINAPI CreateDXGIFactory_hook(__in REFIID riid, __out void **ppFactory)
   {
+    LogFactoryCaller("CreateDXGIFactory", _ReturnAddress());
+
     if(ppFactory)
       *ppFactory = NULL;
     HRESULT ret = dxgihooks.CreateDXGIFactory()(riid, ppFactory);
@@ -284,6 +310,8 @@ private:
 
   static HRESULT WINAPI CreateDXGIFactory1_hook(__in REFIID riid, __out void **ppFactory)
   {
+    LogFactoryCaller("CreateDXGIFactory1", _ReturnAddress());
+
     if(ppFactory)
       *ppFactory = NULL;
     HRESULT ret = dxgihooks.CreateDXGIFactory1()(riid, ppFactory);
@@ -296,6 +324,8 @@ private:
 
   static HRESULT WINAPI CreateDXGIFactory2_hook(UINT Flags, REFIID riid, void **ppFactory)
   {
+    LogFactoryCaller("CreateDXGIFactory2", _ReturnAddress());
+
     if(ppFactory)
       *ppFactory = NULL;
     HRESULT ret = dxgihooks.CreateDXGIFactory2()(Flags, riid, ppFactory);

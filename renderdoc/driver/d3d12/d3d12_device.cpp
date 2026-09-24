@@ -32,6 +32,7 @@
 #include "driver/ihv/amd/amd_rgp.h"
 #include "driver/ihv/amd/official/DXExt/AmdExtD3D.h"
 #include "driver/ihv/nv/nv_aftermath.h"
+#include "hooks/hooks.h"
 #include "jpeg-compressor/jpge.h"
 #include "maths/formatpacking.h"
 #include "serialise/rdcfile.h"
@@ -792,8 +793,11 @@ WrappedID3D12Device::WrappedID3D12Device(ID3D12Device *realDevice, D3D12InitPara
     {
       typedef HRESULT(WINAPI * PFN_CREATE_DXGI_FACTORY)(REFIID, void **);
 
-      PFN_CREATE_DXGI_FACTORY createFunc = (PFN_CREATE_DXGI_FACTORY)GetProcAddress(
-          GetModuleHandleA("dxgi.dll"), "CreateDXGIFactory1");
+      // This factory exists only to look the adapter description up, so it has to be the real one -
+      // going through our wrapper would tie a throwaway query object into the wrapped device state.
+      PFN_CREATE_DXGI_FACTORY createFunc =
+          (PFN_CREATE_DXGI_FACTORY)LibraryHooks::GetOriginalFunction(GetModuleHandleA("dxgi.dll"),
+                                                                     "CreateDXGIFactory1");
 
       IDXGIFactory1 *tmpFactory = NULL;
       HRESULT hr = createFunc(__uuidof(IDXGIFactory1), (void **)&tmpFactory);
